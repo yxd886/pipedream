@@ -1,6 +1,9 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT license.
+
 import torch
 
 # N is batch size; D_in is input dimension;

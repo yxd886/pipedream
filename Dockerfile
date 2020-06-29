@@ -13,7 +13,7 @@
 #
 # https://docs.docker.com/engine/reference/builder/
 #
-FROM nvcr.io/nvidia/pytorch:19.05-py3
+FROM nvcr.io/nvidia/pytorch:19.09-py3
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         texlive-latex-extra \
@@ -22,21 +22,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY requirements.txt requirements.txt
 RUN pip install -r requirements.txt
-
-# Bring in changes from outside container to /tmp
-# (assumes pre_hook.patch is in same directory as Dockerfile)
-COPY pre_hook.patch /tmp
-
-# Change working directory to PyTorch source path
-WORKDIR /opt/pytorch
-
-# Apply modifications and re-build PyTorch
-RUN cd pytorch && patch -p1 < /tmp/pre_hook.patch && \
-    TORCH_CUDA_ARCH_LIST="5.2 6.0 6.1 7.0 7.5+PTX" \
-    CMAKE_PREFIX_PATH="$(dirname $(which conda))/../" \
-    NCCL_INCLUDE_DIR="/usr/include/" \
-    NCCL_LIB_DIR="/usr/lib/" \
-    python setup.py install && python setup.py clean
 
 # Reset default working directory
 WORKDIR /workspace

@@ -1,6 +1,9 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT license.
+
 from torch.optim.optimizer import required
 
 from optimizer import OptimizerWithWeightStashing

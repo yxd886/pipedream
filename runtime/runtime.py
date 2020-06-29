@@ -2,6 +2,8 @@
 # Licensed under the MIT license.
 
 import collections
+import contextlib
+from contextlib import contextmanager
 import itertools
 import time
 import torch
@@ -10,10 +12,18 @@ import torch.distributed as dist
 import communication
 import runtime_utilities
 
+BERT = "bert"
+GPT2 = "gpt2"
 IMAGE_CLASSIFICATION = "image_classification"
-TRANSLATION = "translation"
 SPEECH_TO_TEXT = "speech_to_text"
+TRANSLATION = "translation"
 
+class InputSourceBase():
+    def __init__(self):
+        pass
+
+    def get_inputs(self):
+        raise NotImplementedError
 
 class ModulesWithDependencies:
     def __init__(self, modules_with_dependencies):
@@ -42,16 +52,16 @@ class ModulesWithDependencies:
 
 
 class StageRuntime:
-    def __init__(self, model, distributed_backend, fp16, loss_scale,
+    def __init__(self, model, fp16, loss_scale,
                  training_tensor_shapes, eval_tensor_shapes,
                  training_tensor_dtypes, inputs_module_destinations,
                  target_tensor_names, configuration_maps, master_addr,
                  rank, local_rank, num_ranks_in_server, verbose_freq,
-                 model_type, enable_recompute=False):
+                 model_type,
+                 use_apex=False):
         # Metadata needed for forward and backward pass within this stage.
         self.tensors = []
         self.gradients = {}
-        self.distributed_backend = distributed_backend
         self.fp16 = fp16
         self.loss_scale = loss_scale
         self.training_tensor_shapes = training_tensor_shapes
@@ -59,6 +69,7 @@ class StageRuntime:
         self.training_tensor_dtypes = training_tensor_dtypes
         self.model_type = model_type
         self.target_tensor_names = target_tensor_names
+        self.use_apex = use_apex
 
         self.initialize(model, inputs_module_destinations, configuration_maps,
                         master_addr, rank, local_rank, num_ranks_in_server)
@@ -69,13 +80,7 @@ class StageRuntime:
         self.forward_stats = runtime_utilities.RuntimeStats(forward=True)
         self.backward_stats = runtime_utilities.RuntimeStats(forward=False)
 
-        # Enable recomputation to prevent the need to save activations
-        # computed from the forward pass for the backward pass.
-        self.enable_recompute = enable_recompute
-
-        # Disable recomputation for the last stage.
-        if rank == num_ranks_in_server - 1:
-            self.enable_recompute = False
+        self.input_source = None
 
     def initialize(self, model, inputs_module_destinations,
                    configuration_maps, master_addr, rank,
@@ -106,11 +111,11 @@ class StageRuntime:
         self.tensor_tags["ack"] = tensor_tag
         tensor_tag += 1
 
-        module_to_stage_map = configuration_maps['module_to_stage_map']
-        stage_to_rank_map = configuration_maps['stage_to_rank_map']
-        stage_to_depth_map = configuration_maps['stage_to_depth_map']
+        self.module_to_stage_map = configuration_maps['module_to_stage_map']
+        self.stage_to_rank_map = configuration_maps['stage_to_rank_map']
+        self.stage_to_depth_map = configuration_maps['stage_to_depth_map']
 
-        if module_to_stage_map is None:
+        if self.module_to_stage_map is None:
             # If IP addresses not specified, resort to all layers on
             # single machine.
             assert self.rank is None
@@ -126,16 +131,16 @@ class StageRuntime:
             self.num_warmup_minibatches = 0
             self.comm_handler = None
         else:
-            assert len(module_to_stage_map) == len(model)
+            assert len(self.module_to_stage_map) == len(model)
             assert self.rank is not None
 
             stage_to_module_map = collections.defaultdict(list)
-            for module in range(len(module_to_stage_map)):
-                stage_to_module_map[module_to_stage_map[module]].append(module)
+            for module in range(len(self.module_to_stage_map)):
+                stage_to_module_map[self.module_to_stage_map[module]].append(module)
 
             rank_to_stage_map = {}
-            for stage in stage_to_rank_map:
-                for rank in stage_to_rank_map[stage]:
+            for stage in self.stage_to_rank_map:
+                for rank in self.stage_to_rank_map[stage]:
                     rank_to_stage_map[rank] = stage
 
             # Now, use this mapping to determine the modules contained in
@@ -144,33 +149,33 @@ class StageRuntime:
             self.num_ranks = len(rank_to_stage_map)
             self.num_stages = len(stage_to_module_map)
             self.stage = rank_to_stage_map[self.rank]
-            self.rank_in_stage = stage_to_rank_map[self.stage].index(self.rank)
-            self.num_ranks_in_stage = len(stage_to_rank_map[self.stage])
-            self.num_ranks_in_first_stage = len(stage_to_rank_map[0])
+            self.rank_in_stage = self.stage_to_rank_map[self.stage].index(self.rank)
+            self.num_ranks_in_stage = len(self.stage_to_rank_map[self.stage])
+            self.num_ranks_in_first_stage = len(self.stage_to_rank_map[0])
             self.num_ranks_in_previous_stage = 0
             self.ranks_in_previous_stage = []
             if self.stage > 0:
                 self.num_ranks_in_previous_stage = len(
-                    stage_to_rank_map[self.stage - 1])
-                self.ranks_in_previous_stage = stage_to_rank_map[self.stage - 1]
+                    self.stage_to_rank_map[self.stage - 1])
+                self.ranks_in_previous_stage = self.stage_to_rank_map[self.stage - 1]
             self.num_ranks_in_next_stage = 0
             self.ranks_in_next_stage = []
             if self.stage < self.num_stages - 1:
                 self.num_ranks_in_next_stage = len(
-                    stage_to_rank_map[self.stage + 1])
-                self.ranks_in_next_stage = stage_to_rank_map[self.stage + 1]
+                    self.stage_to_rank_map[self.stage + 1])
+                self.ranks_in_next_stage = self.stage_to_rank_map[self.stage + 1]
             modules = stage_to_module_map[self.stage]
             self.modules_with_dependencies = ModulesWithDependencies(
                 [model[module] for module in modules])
             self.is_criterion = self.stage == (self.num_stages - 1)
-            if stage_to_depth_map is not None:
-                self.num_warmup_minibatches = stage_to_depth_map[
+            if self.stage_to_depth_map is not None:
+                self.num_warmup_minibatches = self.stage_to_depth_map[
                     str(self.stage)]
             else:
                 self.num_warmup_minibatches = self.num_ranks - 1
                 for i in range(self.stage):
                     self.num_warmup_minibatches -= len(
-                        stage_to_rank_map[i])
+                        self.stage_to_rank_map[i])
                 self.num_warmup_minibatches = self.num_warmup_minibatches // \
                     self.num_ranks_in_stage
 
@@ -187,34 +192,54 @@ class StageRuntime:
                 num_ranks_in_server=num_ranks_in_server,
                 world_size=self.num_ranks,
                 fp16=self.fp16,
-                backend=self.distributed_backend)
+                num_stages=self.num_stages)
 
             for i in range(len(model)):
                 for j in range(i+1, len(model)):
                     for tensor_name in model[i][2]:
                         if tensor_name in model[j][1]:
-                            if module_to_stage_map[i] == \
-                                module_to_stage_map[j]:
+                            if self.module_to_stage_map[i] == \
+                                self.module_to_stage_map[j]:
                                 continue
                             # For now, assume that each stage is served by only
                             # a single machine.
-                            if module_to_stage_map[j] == self.stage:
-                                self.receive_ranks[tensor_name] = \
-                                    stage_to_rank_map[module_to_stage_map[i]]
-                            if module_to_stage_map[i] == self.stage:
-                                self.send_ranks[tensor_name] = \
-                                    stage_to_rank_map[module_to_stage_map[j]]
+                            index = self.stage_to_rank_map[self.stage].index(self.rank)
+                            if self.module_to_stage_map[j] == self.stage:
+                                if len(self.stage_to_rank_map[self.stage]) == \
+                                    len(self.stage_to_rank_map[self.module_to_stage_map[i]]):
+                                    self.receive_ranks[tensor_name] = \
+                                        [self.stage_to_rank_map[self.module_to_stage_map[i]][index]]
+                                else:
+                                    self.receive_ranks[tensor_name] = \
+                                        self.stage_to_rank_map[self.module_to_stage_map[i]]
+                            if self.module_to_stage_map[i] == self.stage:
+                                if len(self.stage_to_rank_map[self.stage]) == \
+                                    len(self.stage_to_rank_map[self.module_to_stage_map[j]]):
+                                    self.send_ranks[tensor_name] = \
+                                        [self.stage_to_rank_map[self.module_to_stage_map[j]][index]]
+                                else:
+                                    self.send_ranks[tensor_name] = \
+                                        self.stage_to_rank_map[self.module_to_stage_map[j]]
 
             for model_inputs in inputs_module_destinations.keys():
-                destination_stage = module_to_stage_map[
+                destination_stage = self.module_to_stage_map[
                     inputs_module_destinations[model_inputs]]
+                index = self.stage_to_rank_map[self.stage].index(self.rank)
                 if destination_stage > self.stage:
-                    self.send_ranks[model_inputs] = \
-                        self.ranks_in_next_stage
+                    if len(self.stage_to_rank_map[self.stage]) == len(self.ranks_in_next_stage):
+                        self.send_ranks[model_inputs] = \
+                            [self.ranks_in_next_stage[index]]
+                    else:
+                        self.send_ranks[model_inputs] = \
+                            self.ranks_in_next_stage
 
                 if 0 < self.stage <= destination_stage:
-                    self.receive_ranks[model_inputs] = \
-                        self.ranks_in_previous_stage
+                    if len(self.stage_to_rank_map[self.stage]) == len(self.ranks_in_previous_stage):
+                        self.receive_ranks[model_inputs] = \
+                            [self.ranks_in_previous_stage[index]]
+                    else:
+                        self.receive_ranks[model_inputs] = \
+                            self.ranks_in_previous_stage
 
                 if destination_stage > 0:
                     if model_inputs not in self.tensor_tags:
@@ -224,17 +249,16 @@ class StageRuntime:
         modules = self.modules_with_dependencies.modules()
         for i in range(len(modules)):
             modules[i] = modules[i].cuda()
-            if self.fp16:
-                import apex.fp16_utils as fp16_utils
-                modules[i] = fp16_utils.BN_convert_float(modules[i].half())
 
+    def initialize_distributed_backend(self):
         # Initialize all groups in the same order on every worker.
-        if stage_to_rank_map is not None:
+        modules = self.modules_with_dependencies.modules()
+        if self.stage_to_rank_map is not None:
             groups = []
             for stage in range(self.num_stages):
-                ranks = stage_to_rank_map[stage]
+                ranks = self.stage_to_rank_map[stage]
                 if len(ranks) > 1:
-                    groups.append(dist.new_group(ranks=ranks))
+                    groups.append(dist.new_group(ranks=ranks, backend='nccl'))
                 else:
                     groups.append(None)
             group = groups[self.stage]
@@ -255,28 +279,22 @@ class StageRuntime:
                         sum(x.size()[0] * x.size()[1]
                             if len(x.size()) > 1 else x.size()[0]
                             for x in modules[i].parameters() if x.size())
-                    modules[i] = torch.nn.parallel.DistributedDataParallel(
-                        modules[i],
-                        process_group=group,
-                        device_ids=[local_rank],
-                        output_device=local_rank)
+                    if self.num_stages == 1 and self.use_apex:
+                        import apex
+                        modules[i] = apex.parallel.DistributedDataParallel(
+                            modules[i])
+                    else:
+                        modules[i] = torch.nn.parallel.DistributedDataParallel(
+                            modules[i],
+                            process_group=group,
+                            device_ids=[self.local_rank],
+                            output_device=self.local_rank)
         if self.num_ranks_in_stage > 1:
             module_size = 4. * num_parameters
             print("Replicating stage: ranks=%d, module_size=%.3f" % (
                 self.num_ranks_in_stage, module_size))
 
-        if self.fp16:
-            self.master_parameters = []
-            self.model_parameters = []
-            for i in range(len(modules)):
-                import apex.fp16_utils as fp16_utils
-                module_parameters, module_master_parameters = \
-                    fp16_utils.prep_param_lists(modules[i])
-                self.master_parameters.extend(module_master_parameters)
-                self.model_parameters.extend(module_parameters)
-        else:
-            self.master_parameters = list(self.parameters())
-            self.model_parameters = None
+        self.master_parameters = list(self.parameters())
 
         if self.comm_handler is not None:
             self.comm_handler.initialize(
@@ -294,13 +312,36 @@ class StageRuntime:
     def target(self):
         return self.tensors[-1]["target"]
 
+    def is_first_stage(self):
+        return self.stage is None or (self.stage == 0)
+
+    def is_last_stage(self):
+        return self.stage is None or (self.stage == (self.num_stages-1))
+
     def modules(self):
         return self.modules_with_dependencies.modules()
+
+    def context_handlers(self):
+        context_handlers = []
+        modules = self.modules_with_dependencies.modules()
+        for i, module in enumerate(modules):
+            context_handler = self.dummy_handler()
+            if (i < (len(modules)-1) and self.is_criterion) or not self.is_criterion:
+                if self.num_ranks_in_stage > 1:
+                    context_handler = module.no_sync()
+            context_handlers.append(context_handler)
+        return context_handlers
 
     def parameters(self):
         parameter_iterators = []
         for module in self.modules_with_dependencies.modules():
             parameter_iterators.append(module.parameters())
+        return itertools.chain(*parameter_iterators)
+
+    def named_parameters(self):
+        parameter_iterators = []
+        for module in self.modules_with_dependencies.modules():
+            parameter_iterators.append(module.named_parameters())
         return itertools.chain(*parameter_iterators)
 
     def state_dict(self):
@@ -367,6 +408,11 @@ class StageRuntime:
         for i in range(len(modules)):
             modules[i].eval()
 
+    def set_input_source(self, input_source):
+        if not isinstance(input_source, InputSourceBase):
+           raise Exception('input_source needs to be derived from runtime.InputSourceBase') 
+        self.input_source = input_source
+
     def set_loader(self, loader):
         if loader is not None:
             self.loader_iter = iter(loader)
@@ -376,38 +422,15 @@ class StageRuntime:
     def receive_tensors_forward(self):
         if self.forward_only and len(self.tensors) > 0:
             self.tensors.pop(0)
-        self.tensors.append({})
-        if self.loader_iter is not None:
-            input = next(self.loader_iter)
-            if self.model_type == TRANSLATION:
-                (input, target) = input
-                src, src_length = input
-                tgt, tgt_length = target
+        
+        if self.is_first_stage():
+            if self.input_source is None:
+                raise Exception('input source is None in first stage')
 
-                self.tensors[-1]["input0"] = src.cuda(non_blocking=True)
-                self.tensors[-1]["input1"] = torch.LongTensor(src_length).cuda(
-                    non_blocking=True)
-                self.tensors[-1]["input2"] = tgt[:-1].cuda(non_blocking=True)
-                self.tensors[-1]["target"] = tgt[1:].cuda().contiguous().view(-1)
-                self.tensors[-1]["target_length"] = \
-                    torch.tensor([int(sum(torch.LongTensor(tgt_length) - 1))],
-                                 dtype=torch.int).cuda()
-            elif self.model_type == IMAGE_CLASSIFICATION:
-                (input, target) = input
-                if self.fp16:
-                    input = input.half()
-                self.tensors[-1]["input0"] = input.cuda(non_blocking=True)
-                self.tensors[-1]["target"] = target.cuda(non_blocking=True)
-            elif self.model_type == SPEECH_TO_TEXT:
-                input, target, input_percentages, target_sizes = input
-                input_sizes = input_percentages.mul_(int(input.size(3))).int()
-                self.tensors[-1]["input0"] = input.cuda(non_blocking=True)
-                self.tensors[-1]["input1"] = input_sizes.cuda(non_blocking=True)
-                self.tensors[-1]["target"] = target.cuda(non_blocking=True)
-                self.tensors[-1]["target_length"] = target_sizes.cuda(
-                    non_blocking=True)
+            self.tensors.append(self.input_source.get_inputs())
         else:
             # Receive all required tensors from upstream machines.
+            self.tensors.append({})
             for input_name in self.receive_ranks:
                 if input_name == "ack":
                     continue
@@ -491,9 +514,18 @@ class StageRuntime:
         # Receive tensors from previous worker.
         self.receive_tensors_forward()
         tensors = self.tensors[-1]
+        if recompute_step:
+            tensors = {}
+            for (key, value) in self.tensors[-1].items():
+                tensors[key] = value
 
         # Run forward pass.
-        self._run_forward(tensors)
+        self._run_forward(tensors, recompute_step=recompute_step)
+        if recompute_step:
+            for output_name in self.send_ranks:
+                if output_name == "ack":
+                    continue
+                self.tensors[-1][output_name] = tensors[output_name]
 
         # Send tensors forward.
         self.send_tensors_forward()
@@ -502,50 +534,81 @@ class StageRuntime:
         self.forward_stats.reset_stats()
         self.forward_minibatch_id += 1
 
-    def _run_forward(self, tensors):
+    @contextmanager
+    def dummy_handler(self):
+        try:
+            yield
+        finally:
+            pass
+
+    def _run_forward(self, tensors, recompute_step=False):
         # Perform forward pass through model (self.modules_with_dependencies already
         # has modules in topological order).
         modules = self.modules_with_dependencies.modules()
         all_input_names = self.modules_with_dependencies.all_input_names()
         all_output_names = self.modules_with_dependencies.all_output_names()
-        for i, (module, input_names, output_names) in \
-                enumerate(zip(modules, all_input_names, all_output_names)):
-            if i == (len(modules) - 1) and self.is_criterion:
-                # If layer is criterion (loss).
-                if self.model_type == SPEECH_TO_TEXT:
-                    output = tensors["output"].transpose(0, 1).float()
-                    output_sizes = tensors["output_sizes"].cpu()
-                    target = tensors["target"].cpu()
-                    target_sizes = tensors["target_length"].cpu()
-                    input0_size = tensors["input0_size"].cpu()
-                    module_outputs = [module(output, target, output_sizes, target_sizes) / input0_size[0]]
+        no_grad_context_handler = self.dummy_handler if not recompute_step else torch.no_grad
+        with no_grad_context_handler():
+            for i, (module, input_names, output_names) in \
+                    enumerate(zip(modules, all_input_names, all_output_names)):
+                if i == (len(modules) - 1) and self.is_criterion:
+                    # If layer is criterion (loss).
+                    if self.model_type == BERT:
+                        masked_lm_loss = module(
+                            tensors[input_names[0]][0].view(
+                                -1, self.vocab_size),
+                            tensors["target_lm"].view(-1))
+                        next_sentence_loss = module(
+                            tensors[input_names[0]][1].view(-1, 2),
+                            tensors["target_sentence"].view(-1))
+                        loss = masked_lm_loss + next_sentence_loss
+                        module_outputs = [loss]
+                    elif self.model_type == GPT2:
+                        output = tensors[input_names[0]][..., :-1, :].contiguous()
+                        output = output.view(-1, output.size(-1))
+                        shift_labels = tensors["labels"][..., 1:].contiguous()
+                        loss = module(output, shift_labels.view(-1))
+                        module_outputs = [loss]
+                    elif self.model_type == SPEECH_TO_TEXT:
+                        output = tensors["output"].transpose(0, 1).float()
+                        output_sizes = tensors["output_sizes"].cpu()
+                        target = tensors["target"].cpu()
+                        target_sizes = tensors["target_length"].cpu()
+                        input0_size = tensors["input0_size"].cpu()
+                        module_outputs = [module(output, target, output_sizes,
+                                                    target_sizes) / input0_size[0]]
+                    else:
+                        module_outputs = [module(tensors[input_name],
+                                                 tensors["target"])
+                                          for input_name in input_names]
+                        module_outputs = [sum(module_outputs)]
                 else:
-                    module_outputs = [module(tensors[input_name],
-                                             tensors["target"])
-                                      for input_name in input_names]
-                    module_outputs = [sum(module_outputs)]
+                    # If layer is non-criterion.
+                    module_outputs = module(*[tensors[input_name]
+                                              for input_name in input_names])
+                    if not isinstance(module_outputs, tuple):
+                        module_outputs = (module_outputs,)
+                    module_outputs = list(module_outputs)
+
+                if len(output_names) == 1 and len(module_outputs) > 1:
+                    tensors[output_names[0]] = tuple(module_outputs)
+                else:
+                    for (output_name, module_output) in zip(output_names, module_outputs):
+                        tensors[output_name] = module_output
+
+            self.output = tensors[input_names[0]]
+            if self.is_criterion and self.model_type == TRANSLATION:
+                loss_per_batch = tensors[output_names[0]] * tensors[
+                    self.criterion_input_name].size(1)
+                loss_per_token = loss_per_batch / tensors[
+                    "target_length"][0].item()
+                self.loss = loss_per_token
+            elif self.is_criterion:
+                self.loss = tensors[output_names[0]]
             else:
-                # If layer is non-criterion.
-                module_outputs = module(*[tensors[input_name]
-                                          for input_name in input_names])
-                if not isinstance(module_outputs, tuple):
-                    module_outputs = (module_outputs,)
-                module_outputs = list(module_outputs)
+                self.loss = 1
 
-            for (output_name, module_output) in zip(output_names, module_outputs):
-                tensors[output_name] = module_output
-
-        self.output = tensors[input_names[0]]
-        if self.is_criterion and self.model_type == TRANSLATION:
-            loss_per_batch = tensors[output_names[0]] * tensors[self.criterion_input_name].size(1)
-            loss_per_token = loss_per_batch / tensors["target_length"][0].item()
-            self.loss = loss_per_token
-        elif self.is_criterion:
-            self.loss = tensors[output_names[0]]
-        else:
-            self.loss = 1
-
-    def run_backward(self):
+    def run_backward(self, recompute_step=False):
         # Receive input gradients needed for backward pass.
         self.receive_tensors_backward()
         # Backward pass through modules in reverse order.
@@ -569,6 +632,9 @@ class StageRuntime:
                 all_output_names_set.add(output_name)
 
         tensors = self.tensors.pop(0)
+        if recompute_step:
+            self._run_forward(tensors, recompute_step=False)
+
         # Set inputs, outputs, and output_gradients.
         # Only set outputs/output_gradients for tensors that are not inputs of
         # other modules in this stage.
@@ -622,6 +688,133 @@ class StageRuntime:
             self.backward_stats.print_stats()
         self.backward_stats.reset_stats()
         self.backward_minibatch_id += 1
+
+    def _print_training_progress(self, step, n, start_time, epoch_start_time,
+                                 loss, cumulative_loss):
+        if self.is_last_stage():
+            print("Step [%d/%d] Time/iteration: %.3f seconds (%.3f seconds), Loss: %.3f (%.3f), Memory: %.3f GB (%.3f GB)" % (
+                (step + 1), n,
+                (time.time() - start_time) / self.update_interval,
+                (time.time() - epoch_start_time) / (step + 1),
+                loss, sum(cumulative_loss) / len(cumulative_loss),
+                float(torch.cuda.memory_allocated()) / 10**9,
+                float(torch.cuda.memory_cached()) / 10**9))
+        else:
+            print("Step [%d/%d] Time/iteration: %.3f seconds (%.3f seconds), Memory: %.3f GB (%.3f GB)" % (
+                (step + 1), n,
+                (time.time() - start_time) / self.update_interval,
+                (time.time() - epoch_start_time) / (step + 1),
+                float(torch.cuda.memory_allocated()) / 10**9,
+                float(torch.cuda.memory_cached()) / 10**9))
+
+    def run_training_loop_with_flushes(self, n, optimizer, recompute_step):
+        # NOTE: This does not work with replicated stages since Python's `no_sync()`
+        # API is not intended for a computation pattern of a sequence of forward
+        # passes followed by a sequence of backward passes. If run with replicated
+        # stages, weight synchronization will happen every backward pass, leading
+        # to poor performance.
+        cumulative_loss = []
+        step = 0
+        loss = None
+        self.train(n)
+
+        start_time = time.time()
+        epoch_start_time = time.time()
+        for base_step in range(0, n, self.update_interval):
+            start_time = time.time()
+
+            for step in range(base_step, base_step+self.update_interval):
+                self.run_forward(recompute_step=recompute_step)
+                if self.is_last_stage():
+                    loss = self.loss.item()
+                    cumulative_loss.append(loss)
+
+            for step in range(base_step, base_step+self.update_interval):
+                self.run_backward(recompute_step=recompute_step)
+
+            optimizer.step()
+            optimizer.zero_grad()
+
+            if self.local_rank != -1:
+                import torch.distributed as dist; dist.barrier()
+
+            self._print_training_progress(step, n, start_time, epoch_start_time,
+                                          loss, cumulative_loss)
+
+        print("Time needed for %d iterations: %.2f seconds" % (
+            n, time.time() - epoch_start_time))
+
+    def run_training_loop(self, n, optimizer, recompute_step, no_input_pipelining):
+        cumulative_loss = []
+        step = 0
+        loss = None
+        if no_input_pipelining:
+            num_warmup_minibatches = 0
+        else:
+            num_warmup_minibatches = self.num_warmup_minibatches
+        self.train(n)
+
+        start_time = time.time()
+        epoch_start_time = time.time()
+        with contextlib.ExitStack() as stack:
+            for context_handler in self.context_handlers():
+                stack.enter_context(context_handler)
+            for step in range(num_warmup_minibatches):
+                optimizer.load_forward_params()
+                self.run_forward(recompute_step=recompute_step)
+
+        for base_step in range(0, n - num_warmup_minibatches, self.update_interval):
+            start_time = time.time()
+            step = base_step
+            with contextlib.ExitStack() as stack:
+                for context_handler in self.context_handlers():
+                    stack.enter_context(context_handler)
+                num_steps_to_process = min(
+                    self.update_interval,
+                    n - num_warmup_minibatches - base_step)
+                for step in range(base_step, base_step+num_steps_to_process-1):
+                    if not no_input_pipelining:
+                        optimizer.load_forward_params()
+                    self.run_forward(recompute_step=recompute_step)
+
+                    if self.is_last_stage():
+                        loss = self.loss.item()
+                        cumulative_loss.append(loss)
+
+                    if not no_input_pipelining:
+                        optimizer.load_backward_params()
+                    self.run_backward(recompute_step=recompute_step)
+
+            if not no_input_pipelining:
+                optimizer.load_forward_params()
+            self.run_forward(recompute_step=recompute_step)
+
+            if self.is_last_stage():
+                loss = self.loss.item()
+                cumulative_loss.append(loss)
+
+            if not no_input_pipelining:
+                optimizer.load_backward_params()
+            self.run_backward(recompute_step=recompute_step)
+
+            optimizer.step()
+            optimizer.zero_grad()
+            step += 1
+
+            self._print_training_progress(step, n, start_time, epoch_start_time,
+                                          loss, cumulative_loss)
+
+        with contextlib.ExitStack() as stack:
+            for context_handler in self.context_handlers():
+                stack.enter_context(context_handler)
+            for step in range(n - num_warmup_minibatches, n):
+                optimizer.load_backward_params()
+                self.run_backward(recompute_step=recompute_step)
+            optimizer.step()
+            optimizer.zero_grad()
+
+        print("Time needed for %d iterations: %.2f seconds" % (
+            n, time.time() - epoch_start_time))
 
     def num_tokens(self):
         return self.tensors[-1]["target_length"][0].item()
