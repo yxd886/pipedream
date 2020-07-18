@@ -3,15 +3,15 @@
 
 import torch
 from transformers.modeling import BertLayer
-from transformers.modeling import BertEmbeddings
+from transformers.modeling import BertPreTrainingHeads
+from transformers.modeling import BertPooler
 from transformers.modeling import BertLayerNorm
 
-class StartingStage(torch.nn.Module):
-    def __init__(self, num_layers_per_stage, config):
-        super(StartingStage, self).__init__()
-        self.embedding_layer = BertEmbeddings(config)
+class IntermediateStage(torch.nn.Module):
+    def __init__(self, config):
+        super(IntermediateStage, self).__init__()
         self.layers = []
-        for i in range(num_layers_per_stage):
+        for i in range(config.num_hidden_layers // 16):
             self.layers.append(BertLayer(config))
         self.layers = torch.nn.ModuleList(self.layers)
         self.config=config; self.apply(self.init_bert_weights)
@@ -29,11 +29,10 @@ class StartingStage(torch.nn.Module):
         if isinstance(module, torch.nn.Linear) and module.bias is not None:
             module.bias.data.zero_()
 
-    def forward(self, input0, input1, input2):
-        out0 = input0
-        out1 = input1
-        out2 = input2
-        out = self.embedding_layer(out0, out1)
+    def forward(self, input1, input0):
+        out0 = input0.clone()
+        out1 = input1.clone()
+        out = out0
         for layer in self.layers:
-            out = layer(out, out2)
-        return (out2, out)
+            out = layer(out, out1)
+        return (out1, out)

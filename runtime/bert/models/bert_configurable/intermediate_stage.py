@@ -30,8 +30,8 @@ class IntermediateStage(torch.nn.Module):
             module.bias.data.zero_()
 
     def forward(self, input1, input0):
-        out0 = input0.clone()
-        out1 = input1.clone()
+        out0 = input0
+        out1 = input1
         out = out0
         for layer in self.layers:
             out = layer(out, out1)

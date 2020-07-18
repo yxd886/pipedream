@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import random
+import re
 from io import open
 import time
 
@@ -610,6 +611,13 @@ def main():
 
     # Prepare model.
     config = BertConfig.from_json_file(args.bert_config_path)
+    m = re.match(r'.*bert(\d+).*', args.module)
+    if m is not None:
+        num_hidden_layers = int(m.group(1))
+        config.num_hidden_layers = num_hidden_layers
+        args.module = args.module.replace(m.group(1), "")
+    else:
+        raise Exception("Invalid --module argument!")
     import importlib
     module = importlib.import_module(args.module)
     criterion = torch.nn.CrossEntropyLoss(ignore_index=-1)
@@ -620,14 +628,6 @@ def main():
     else:
         arch = module.arch()
         model = module.model(config, criterion)
-
-    total_params = 0
-    total_trainable_params = 0
-    for (stage, _, _) in model[:-1]:
-        total_params += sum(p.numel() for p in stage.parameters())
-        total_trainable_params += sum(p.numel() for p in stage.parameters() if p.requires_grad)
-    print("Total number of parameters: %d" % total_params)
-    print("Total number of trainable parameters: %d" % total_trainable_params)
 
     input_size = [args.train_batch_size, args.max_seq_length]
     training_tensor_shapes = {
@@ -641,7 +641,8 @@ def main():
 
     total_flops = 0
     total_params = 0
-    for module_id, (stage, inputs, outputs) in enumerate(model[:-1]):  # Skip last layer (loss).
+    total_trainable_params = 0
+    for module_id, (stage_module_fn, inputs, outputs) in enumerate(model[:-1]):  # Skip last layer (loss).
         input_tensors = []
         for module_input in inputs:
             if module_input in inputs_module_destinations:
@@ -650,24 +651,28 @@ def main():
             input_tensor = torch.ones(tuple(training_tensor_shapes[module_input]),
                                       dtype=dtypes[module_input]).cuda()
             input_tensors.append(input_tensor)
-        stage.cuda()
+        stage_module = stage_module_fn()
+        stage_module.cuda()
         # PyTorch should not maintain metadata for a backward pass on
         # synthetic inputs. Without the following line, the runtime is
         # as much as 1.5x slower in a full DP configuration.
         with torch.no_grad():
-            output_tensors = stage(*tuple(input_tensors))
+            output_tensors = stage_module(*tuple(input_tensors))
         if not type(output_tensors) is tuple:
             output_tensors = [output_tensors]
         for output, output_tensor in zip(outputs,
                                          list(output_tensors)):
             training_tensor_shapes[output] = list(output_tensor.size())
             dtypes[output] = output_tensor.dtype
-        model_complexity_info = get_model_complexity_info(stage, tuple(input_tensors), print_per_layer_stat=False)
+        model_complexity_info = get_model_complexity_info(stage_module, tuple(input_tensors), print_per_layer_stat=False)
         total_flops += float(model_complexity_info[0].split(" ")[0])
-        total_params += float(model_complexity_info[1].split(" ")[0])
+        total_params += sum(p.numel() for p in stage_module.parameters())
+        total_trainable_params += sum(p.numel() for p in stage_module.parameters() if p.requires_grad)
+        del stage_module
     print("Total number of floating point operations: %.2f * 10**9" % (
         total_flops * args.train_batch_size * 6))
-    print("Total number of parameters: %d * 10**6" % total_params)
+    print("Total number of parameters: %d" % total_params)
+    print("Total number of trainable parameters: %d" % total_trainable_params)
 
     eval_tensor_shapes = {}
     for key in training_tensor_shapes:

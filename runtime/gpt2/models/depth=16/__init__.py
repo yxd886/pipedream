@@ -9,38 +9,22 @@ def arch():
     return "gpt2"
 
 def model(config, criterion):
-    stage0 = StartingStage(config)
-    stage1 = IntermediateStage(config)
-    stage2 = IntermediateStage(config)
-    stage3 = IntermediateStage(config)
-    stage4 = IntermediateStage(config)
-    stage5 = IntermediateStage(config)
-    stage6 = IntermediateStage(config)
-    stage7 = IntermediateStage(config)
-    stage8 = IntermediateStage(config)
-    stage9 = IntermediateStage(config)
-    stage10 = IntermediateStage(config)
-    stage11 = IntermediateStage(config)
-    stage12 = IntermediateStage(config)
-    stage13 = IntermediateStage(config)
-    stage14 = IntermediateStage(config)
-    stage15 = EndingStage(config)
     return [
-        (stage0, ["input_ids"], ["out0"]),
-        (stage1, ["out0"], ["out1"]),
-        (stage2, ["out1"], ["out2"]),
-        (stage3, ["out2"], ["out3"]),
-        (stage4, ["out3"], ["out4"]),
-        (stage5, ["out4"], ["out5"]),
-        (stage6, ["out5"], ["out6"]),
-        (stage7, ["out6"], ["out7"]),
-        (stage8, ["out7"], ["out8"]),
-        (stage9, ["out8"], ["out9"]),
-        (stage10, ["out9"], ["out10"]),
-        (stage11, ["out10"], ["out11"]),
-        (stage12, ["out11"], ["out12"]),
-        (stage13, ["out12"], ["out13"]),
-        (stage14, ["out13"], ["out14"]),
-        (stage15, ["out14"], ["out15"]),
-        (criterion, ["out15"], ["loss"])
+        (lambda: StartingStage(config), ["input_ids"], ["out0"]),
+        (lambda: IntermediateStage(config), ["out0"], ["out1"]),
+        (lambda: IntermediateStage(config), ["out1"], ["out2"]),
+        (lambda: IntermediateStage(config), ["out2"], ["out3"]),
+        (lambda: IntermediateStage(config), ["out3"], ["out4"]),
+        (lambda: IntermediateStage(config), ["out4"], ["out5"]),
+        (lambda: IntermediateStage(config), ["out5"], ["out6"]),
+        (lambda: IntermediateStage(config), ["out6"], ["out7"]),
+        (lambda: IntermediateStage(config), ["out7"], ["out8"]),
+        (lambda: IntermediateStage(config), ["out8"], ["out9"]),
+        (lambda: IntermediateStage(config), ["out9"], ["out10"]),
+        (lambda: IntermediateStage(config), ["out10"], ["out11"]),
+        (lambda: IntermediateStage(config), ["out11"], ["out12"]),
+        (lambda: IntermediateStage(config), ["out12"], ["out13"]),
+        (lambda: IntermediateStage(config), ["out13"], ["out14"]),
+        (lambda: EndingStage(config), ["out14"], ["out15"]),
+        (lambda: criterion, ["out15"], ["loss"])
     ]

@@ -1,13 +1,29 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT license.
-
 import torch
 import sys
 sys.path.append("../..")
-import sgd
+from torch.optim.optimizer import required
+from optimizer_with_stashing import OptimizerWithStashing
+
+class SGDWithStashing(OptimizerWithStashing):
+    """
+    SGD optimizer with weight stashing.
+    """
+    def __init__(self, modules, master_parameters, model_parameters,
+                 loss_scale, num_versions, lr=required, momentum=0,
+                 dampening=0, weight_decay=0, nesterov=False, verbose_freq=0,
+                 macrobatch=False):
+        super(SGDWithStashing, self).__init__(
+            optim_name='SGD',
+            modules=modules, master_parameters=master_parameters,
+            model_parameters=model_parameters, loss_scale=loss_scale,
+            num_versions=num_versions, lr=lr, momentum=momentum,
+            dampening=dampening, weight_decay=weight_decay,
+            nesterov=nesterov, verbose_freq=verbose_freq,
+            macrobatch=macrobatch,
+        )
 
 def test(num_versions, assertion_ground_truth):
     # N is batch size; D_in is input dimension;
@@ -31,9 +47,11 @@ def test(num_versions, assertion_ground_truth):
         torch.nn.Linear(D_H, D_out)
     ).cuda()
     loss_fn = torch.nn.MSELoss()
-    optimizer = sgd.SGDWithWeightStashing([model], model.parameters(),
-                                          num_versions=num_versions,
-                                          lr=1e-1)
+    optimizer = SGDWithStashing([model], model.parameters(),
+                                model_parameters=None,
+                                loss_scale=1.0,
+                                num_versions=num_versions,
+                                lr=1e-1)
 
     inputs = [x1, x2, x3]
 
@@ -51,10 +69,10 @@ def test(num_versions, assertion_ground_truth):
 
     for loss, x in zip(losses, inputs):
         optimizer.zero_grad()
-        optimizer.load_old_params()
+        optimizer.load_backward_params()
         loss.backward()
         x_grads.append(x.grad.clone().detach())
-        optimizer.load_new_params()
+        optimizer.load_forward_params()
         optimizer.step()
 
     # Assert that the right weight versions are used to compute the

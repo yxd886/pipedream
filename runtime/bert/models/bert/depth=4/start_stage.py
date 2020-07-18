@@ -7,11 +7,11 @@ from transformers.modeling import BertEmbeddings
 from transformers.modeling import BertLayerNorm
 
 class StartingStage(torch.nn.Module):
-    def __init__(self, num_layers_per_stage, config):
+    def __init__(self, config):
         super(StartingStage, self).__init__()
         self.embedding_layer = BertEmbeddings(config)
         self.layers = []
-        for i in range(num_layers_per_stage):
+        for i in range(config.num_hidden_layers // 4):
             self.layers.append(BertLayer(config))
         self.layers = torch.nn.ModuleList(self.layers)
         self.config=config; self.apply(self.init_bert_weights)

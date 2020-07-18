@@ -119,7 +119,9 @@ class StageRuntime:
             # If IP addresses not specified, resort to all layers on
             # single machine.
             assert self.rank is None
-            self.modules_with_dependencies = ModulesWithDependencies(model)
+            self.modules_with_dependencies = ModulesWithDependencies(
+                [(stage_module_fn(), inputs, outputs)
+                 for (stage_module_fn, inputs, outputs) in model])
             self.is_criterion = True
             self.rank_in_stage = 0
             self.num_ranks = 1
@@ -166,7 +168,7 @@ class StageRuntime:
                 self.ranks_in_next_stage = self.stage_to_rank_map[self.stage + 1]
             modules = stage_to_module_map[self.stage]
             self.modules_with_dependencies = ModulesWithDependencies(
-                [model[module] for module in modules])
+                [(model[module][0](), model[module][1], model[module][2]) for module in modules])
             self.is_criterion = self.stage == (self.num_stages - 1)
             if self.stage_to_depth_map is not None:
                 self.num_warmup_minibatches = self.stage_to_depth_map[
