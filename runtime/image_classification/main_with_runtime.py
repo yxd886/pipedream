@@ -380,15 +380,15 @@ def train(train_loader, r, optimizer, epoch):
             top1.update(prec1[0], output.size(0))
             top5.update(prec5[0], output.size(0))
 
-
-            top5accuracy = top5.val
-            gap = top5accuracy//5*5
-            if gap not in recorded_accuracy5:
-                global_end_time = time.time()
-                recorded_accuracy5.append(gap)
-                print("achieveing {}% at the first time, concreate top5 accuracy: {}%. time slot: {}, duration: {}s\n".format(gap,top5.val,global_end_time,global_end_time-global_start_time),flush=True)
-                with open("time_record.txt","a+") as f:
-                    f.write("achieveing {}% at the first time, concreate top5 accuracy: {}%. time slot: {}, duration: {}s\n".format(gap,top5.val,global_end_time,global_end_time-global_start_time))
+            if args.rank==0:
+                top5accuracy = top5.val
+                gap = top5accuracy//5*5
+                if gap not in recorded_accuracy5:
+                    global_end_time = time.time()
+                    recorded_accuracy5.append(gap)
+                    print("achieveing {}% at the first time, concreate top5 accuracy: {}%. time slot: {}, duration: {}s\n".format(gap,top5.val,global_end_time,global_end_time-global_start_time),flush=True)
+                    with open("time_record.txt","a+") as f:
+                        f.write("achieveing {}% at the first time, concreate top5 accuracy: {}%. time slot: {}, duration: {}s\n".format(gap,top5.val,global_end_time,global_end_time-global_start_time))
 
 
             # measure elapsed time
