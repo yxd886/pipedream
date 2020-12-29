@@ -305,7 +305,7 @@ def main():
     # if checkpoint is loaded, start by running validation
     if args.resume:
         assert args.start_epoch > 0
-        validate(val_loader, r, args.start_epoch-1)
+        #validate(val_loader, r, args.start_epoch-1)
 
     for epoch in range(args.start_epoch, args.epochs):
         if distributed_sampler:
@@ -318,11 +318,11 @@ def main():
             train(train_loader, r, optimizer, epoch)
 
             # evaluate on validation set
-            prec1 = validate(val_loader, r, epoch)
-            if r.stage != r.num_stages: prec1 = 0
+            #prec1 = validate(val_loader, r, epoch)
+            #if r.stage != r.num_stages: prec1 = 0
 
             # remember best prec@1 and save checkpoint
-            best_prec1 = max(prec1, best_prec1)
+            best_prec1 = 1#max(prec1, best_prec1)
 
             should_save_checkpoint = args.checkpoint_dir_not_nfs or r.rank_in_stage == 0
             if args.checkpoint_dir and should_save_checkpoint:
