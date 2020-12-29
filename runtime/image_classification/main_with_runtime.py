@@ -372,7 +372,7 @@ def train(train_loader,val_loader, r, optimizer, epoch):
 
         if i!=0 and i % 200 == 0:
             r.set_loader(val_loader)
-            for i in range(2*num_warmup_minibatches):
+            for i in range(5):
                 r.run_forward()
             if is_last_stage():
                 # measure accuracy and record loss
