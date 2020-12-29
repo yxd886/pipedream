@@ -369,36 +369,6 @@ def train(train_loader,val_loader, r, optimizer, epoch):
 
     for i in range(n - num_warmup_minibatches):
         # perform forward pass
-
-        if i!=0 and i % 200 == 0:
-            r.set_loader(val_loader)
-            for i in range(5):
-                r.run_forward()
-            if is_last_stage():
-                # measure accuracy and record loss
-                output, target, loss = r.output, r.target, r.loss
-                prec1, prec5 = accuracy(output, target, topk=(1, 5))
-                losses.update(loss.item(), output.size(0))
-                top1.update(prec1[0], output.size(0))
-                top5.update(prec5[0], output.size(0))
-                print('Validate: [{0}][{1}/{2}]\t'
-                      'Prec@1: {top1.val:.3f} ({top1.avg:.3f})\t'
-                      'Prec@5: {top5.val:.3f} ({top5.avg:.3f})'.format(
-                       epoch, i, n, top1=top1, top5=top5))
-                top5accuracy = top5.val
-                gap = top5accuracy // 5 * 5
-                if gap not in recorded_accuracy5:
-                    global_end_time = time.time()
-                    recorded_accuracy5.append(gap)
-                    print(
-                        "achieveing {}% at the first time, concreate top5 accuracy: {}%. time slot: {}, duration: {}s\n".format(
-                            gap, top5.val, global_end_time, global_end_time - global_start_time), flush=True)
-                    with open("time_record.txt", "a+") as f:
-                        f.write(
-                            "achieveing {}% at the first time, concreate top5 accuracy: {}%. time slot: {}, duration: {}s\n".format(
-                                gap, top5.val, global_end_time, global_end_time - global_start_time))
-            r.set_loader(train_loader)
-
         r.run_forward()
 
         # Adjust learning rate
