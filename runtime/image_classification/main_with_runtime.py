@@ -347,6 +347,8 @@ def train(train_loader,val_loader, r, optimizer, epoch):
         n = min(n, args.num_minibatches)
     r.train(n)
     if not is_first_stage(): train_loader = None
+    if not is_first_stage(): val_loader = None
+
     r.set_loader(train_loader)
 
     end = time.time()
@@ -368,7 +370,7 @@ def train(train_loader,val_loader, r, optimizer, epoch):
     for i in range(n - num_warmup_minibatches):
         # perform forward pass
 
-        if i % 200 == 0:
+        if i!=0 and i % 200 == 0:
             r.set_loader(val_loader)
             for i in range(2*num_warmup_minibatches):
                 r.run_forward()
