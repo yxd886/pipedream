@@ -447,7 +447,7 @@ if __name__ == '__main__':
 
     input_node = graph.Node("input_node", node_desc="Input")
     full_graph = graph.Graph.from_str(open(args.profile_filename, 'r').read())
-    initialize_weights = (args.arch == "vgg16" or args.arch == "resnet50")
+    initialize_weights = True#(args.arch == "vgg16" or args.arch == "resnet50")
     input_node.stage_id = 0
     sinks = full_graph.sinks()
     # Remove all unneeded sinks that are not used, makes code generation easier.
