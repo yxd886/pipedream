@@ -367,6 +367,9 @@ def train(train_loader,val_loader, r, optimizer, epoch):
     for i in range(num_warmup_minibatches):
         r.run_forward()
 
+    accurate_times= []
+    total_times = []
+
     for i in range(n - num_warmup_minibatches):
         # perform forward pass
         r.run_forward()
@@ -383,14 +386,19 @@ def train(train_loader,val_loader, r, optimizer, epoch):
             top5.update(prec5[0], output.size(0))
 
 
-            top5accuracy = top5.val
-            gap = top5accuracy//5*5
-            if gap not in recorded_accuracy5:
-                global_end_time = time.time()
-                recorded_accuracy5.append(gap)
-                print("achieveing {}% at the first time, concreate top5 accuracy: {}%. time slot: {}, duration: {}s\n".format(gap,top5.val,global_end_time,global_end_time-global_start_time),flush=True)
-                with open("time_record.txt","a+") as f:
-                    f.write("achieveing {}% at the first time, concreate top5 accuracy: {}%. time slot: {}, duration: {}s\n".format(gap,top5.val,global_end_time,global_end_time-global_start_time))
+            cur_top5accuracy = top5.val
+
+            accurate_times.append(int(cur_top5accuracy/100*target.size(0)))
+            total_times.append(target.size(0))
+            if sum(total_times)==64:
+                top5accuracy = (sum(accurate_times)/64)*100
+                gap = top5accuracy//5*5
+                if gap not in recorded_accuracy5:
+                    global_end_time = time.time()
+                    recorded_accuracy5.append(gap)
+                    print("achieveing {}% at the first time, concreate top5 accuracy: {}%. time slot: {}, duration: {}s\n".format(gap,top5accuracy,global_end_time,global_end_time-global_start_time),flush=True)
+                    with open("time_record.txt","a+") as f:
+                        f.write("achieveing {}% at the first time, concreate top5 accuracy: {}%. time slot: {}, duration: {}s\n".format(gap,top5accuracy,global_end_time,global_end_time-global_start_time))
 
 
             # measure elapsed time
@@ -400,19 +408,20 @@ def train(train_loader,val_loader, r, optimizer, epoch):
             full_epoch_time = (epoch_time / float(i+1)) * float(n)
 
 
-            if i % args.print_freq == 0:
+            if i % args.print_freq == 0 and sum(total_times)==64:
                 print('Epoch: [{0}][{1}/{2}]\t'
                       'Time: {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                       'Epoch time [hr]: {epoch_time:.3f} ({full_epoch_time:.3f})\t'
                       'Memory: {memory:.3f} ({cached_memory:.3f})\t'
                       'Loss: {loss.val:.4f} ({loss.avg:.4f})\t'
-                      'Prec@1: {top1.val:.3f} ({top1.avg:.3f})\t'
-                      'Prec@5: {top5.val:.3f} ({top5.avg:.3f})'.format(
+                      'Prec@5: {top5accuracy)'.format(
                        epoch, i, n, batch_time=batch_time,
                        epoch_time=epoch_time, full_epoch_time=full_epoch_time,
-                       loss=losses, top1=top1, top5=top5,
+                       loss=losses,  top5accuracy=top5accuracy,
                        memory=(float(torch.cuda.memory_allocated()) / 10**9),
                        cached_memory=(float(torch.cuda.memory_cached()) / 10**9)))
+                accurate_times = []
+                total_times = []
                 import sys; sys.stdout.flush()
         else:
             if i % args.print_freq == 0:
