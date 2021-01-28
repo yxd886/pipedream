@@ -408,7 +408,7 @@ def train(train_loader,val_loader, r, optimizer, epoch):
             full_epoch_time = (epoch_time / float(i+1)) * float(n)
 
 
-            if i % args.print_freq == 0 and sum(total_times)==64:
+            if sum(total_times)==64:
                 print('Epoch: [{0}][{1}/{2}]\t'
                       'Time: {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                       'Epoch time [hr]: {epoch_time:.3f} ({full_epoch_time:.3f})\t'
