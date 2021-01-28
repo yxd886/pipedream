@@ -414,7 +414,7 @@ def train(train_loader,val_loader, r, optimizer, epoch):
                       'Epoch time [hr]: {epoch_time:.3f} ({full_epoch_time:.3f})\t'
                       'Memory: {memory:.3f} ({cached_memory:.3f})\t'
                       'Loss: {loss.val:.4f} ({loss.avg:.4f})\t'
-                      'Prec@5: {top5accuracy)'.format(
+                      'Prec@5: {top5accuracy}'.format(
                        epoch, i, n, batch_time=batch_time,
                        epoch_time=epoch_time, full_epoch_time=full_epoch_time,
                        loss=losses,  top5accuracy=top5accuracy,
